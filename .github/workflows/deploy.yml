@@ -1,0 +1,49 @@
+name: Test and Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install boto3 flask pandas numpy ib_insync
+
+      - name: Lint check
+        run: python -m py_compile ibkr_pipeline.py &&
+             python -m py_compile dashboard_app.py &&
+             python -m py_compile daily_pipeline.py &&
+             echo "✅ All files compile cleanly"
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/ibkr-automation
+            git pull origin main
+            # Restart dashboard if running
+            sudo kill $(pgrep -f "dashboard/app.py") 2>/dev/null || true
+            cp dashboard_app.py ~/dashboard/app.py
+            cp ibkr_pipeline.py ~/ibkr_pipeline.py
+            cp daily_pipeline.py ~/daily_pipeline.py
+            sudo nohup /usr/bin/python3.11 ~/dashboard/app.py > ~/dashboard/dashboard.log 2>&1 &
+            echo "✅ Deployed successfully"
