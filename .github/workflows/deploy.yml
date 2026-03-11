@@ -40,10 +40,11 @@ jobs:
           script: |
             cd ~/ibkr-automation
             git pull origin main
-            # Restart dashboard if running
             sudo kill $(pgrep -f "dashboard/app.py") 2>/dev/null || true
+            sleep 2
             cp dashboard_app.py ~/dashboard/app.py
             cp ibkr_pipeline.py ~/ibkr_pipeline.py
             cp daily_pipeline.py ~/daily_pipeline.py
-            sudo nohup /usr/bin/python3.11 ~/dashboard/app.py > ~/dashboard/dashboard.log 2>&1 &
-            echo "✅ Deployed successfully"
+            sudo bash -c 'nohup /usr/bin/python3.11 /home/ec2-user/dashboard/app.py > /home/ec2-user/dashboard/dashboard.log 2>&1 &'
+            sleep 2
+            curl -s -o /dev/null -w "%{http_code}" http://localhost && echo " ✅ Dashboard is live" || echo " ❌ Dashboard failed to start"
