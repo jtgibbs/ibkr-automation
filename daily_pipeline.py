@@ -1,0 +1,183 @@
+import boto3
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import json
+import traceback
+
+# ---- CONFIG ----
+DATA_BUCKET = "jgs3-automation-data"
+REPORTS_BUCKET = "jgs3-automation-reports"
+LOGS_BUCKET = "jgs3-automation-logs"
+TODAY = datetime.now().strftime('%Y/%m/%d')
+TIMESTAMP = datetime.now().isoformat()
+
+s3 = boto3.client('s3')
+
+def log_to_s3(message, level="INFO"):
+    """Write a log entry to S3 — every production pipeline needs logging."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "level": level,
+        "message": message
+    }
+    log_key = f"pipeline_logs/{TODAY}/run_{datetime.now().strftime('%H%M%S')}.json"
+    s3.put_object(
+        Bucket=LOGS_BUCKET,
+        Key=log_key,
+        Body=json.dumps(entry, indent=2),
+        ContentType='application/json'
+    )
+    print(f"[{level}] {message}")
+
+def fetch_market_data():
+    """
+    PHASE 2 SWAP: Replace this with ib_insync calls to pull real
+    positions, P&L, and market data from IBKR.
+    For now, simulate a realistic daily portfolio snapshot.
+    """
+    symbols = ['SPY', 'QQQ', 'IWM', 'TLT', 'GLD']
+    np.random.seed(int(datetime.now().timestamp()) % 10000)
+
+    rows = []
+    for sym in symbols:
+        base_price = {'SPY': 585, 'QQQ': 510, 'IWM': 225, 'TLT': 92, 'GLD': 245}[sym]
+        shares = np.random.choice([50, 100, 200, 500])
+        entry_price = round(base_price * np.random.uniform(0.95, 1.02), 2)
+        current_price = round(base_price * np.random.uniform(0.97, 1.04), 2)
+        rows.append({
+            'symbol': sym,
+            'shares': shares,
+            'entry_price': entry_price,
+            'current_price': current_price,
+            'market_value': round(current_price * shares, 2),
+            'unrealized_pnl': round((current_price - entry_price) * shares, 2),
+            'pnl_pct': round((current_price - entry_price) / entry_price * 100, 2)
+        })
+
+    return pd.DataFrame(rows)
+
+def analyze_portfolio(df):
+    """Run analysis on the portfolio — this is where your strategy logic goes."""
+    summary = {
+        'generated_at': TIMESTAMP,
+        'total_market_value': round(df['market_value'].sum(), 2),
+        'total_unrealized_pnl': round(df['unrealized_pnl'].sum(), 2),
+        'best_performer': df.loc[df['pnl_pct'].idxmax(), 'symbol'],
+        'best_return_pct': float(df['pnl_pct'].max()),
+        'worst_performer': df.loc[df['pnl_pct'].idxmin(), 'symbol'],
+        'worst_return_pct': float(df['pnl_pct'].min()),
+        'positions_green': int((df['unrealized_pnl'] > 0).sum()),
+        'positions_red': int((df['unrealized_pnl'] < 0).sum()),
+    }
+    return summary
+
+def generate_report(df, summary):
+    """Build an HTML report — later this becomes your SES email body."""
+    green = '#28a745'
+    red = '#dc3545'
+    pnl_color = green if summary['total_unrealized_pnl'] >= 0 else red
+
+    rows_html = ""
+    for _, row in df.iterrows():
+        color = green if row['unrealized_pnl'] >= 0 else red
+        rows_html += f"""
+        <tr>
+            <td style="padding:8px;border-bottom:1px solid #eee"><b>{row['symbol']}</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee">{row['shares']}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${row['current_price']:.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">${row['market_value']:,.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:{color}">${row['unrealized_pnl']:+,.2f}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;color:{color}">{row['pnl_pct']:+.2f}%</td>
+        </tr>"""
+
+    html = f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:700px;margin:auto">
+    <h2 style="color:#1B3A5C">Daily Portfolio Report</h2>
+    <p style="color:#666">{datetime.now().strftime('%A, %B %d, %Y')}</p>
+
+    <div style="background:#f8f9fa;padding:20px;border-radius:8px;margin:20px 0">
+        <h3 style="margin-top:0">Summary</h3>
+        <p>Total Value: <b>${summary['total_market_value']:,.2f}</b></p>
+        <p>Unrealized P&L: <b style="color:{pnl_color}">${summary['total_unrealized_pnl']:+,.2f}</b></p>
+        <p>Positions: {summary['positions_green']} green / {summary['positions_red']} red</p>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse">
+        <tr style="background:#1B3A5C;color:white">
+            <th style="padding:10px;text-align:left">Symbol</th>
+            <th style="padding:10px;text-align:left">Shares</th>
+            <th style="padding:10px;text-align:left">Price</th>
+            <th style="padding:10px;text-align:left">Value</th>
+            <th style="padding:10px;text-align:left">P&L</th>
+            <th style="padding:10px;text-align:left">Return</th>
+        </tr>
+        {rows_html}
+    </table>
+
+    <p style="color:#999;font-size:12px;margin-top:30px">
+        Generated by Automation Pipeline | Best: {summary['best_performer']} ({summary['best_return_pct']:+.2f}%)
+        | Worst: {summary['worst_performer']} ({summary['worst_return_pct']:+.2f}%)
+    </p>
+    </body></html>
+    """
+    return html
+
+# ---- MAIN PIPELINE ----
+def run_pipeline():
+    try:
+        log_to_s3("Pipeline started")
+
+        # Step 1: Fetch data
+        df = fetch_market_data()
+        log_to_s3(f"Fetched {len(df)} positions")
+
+        # Step 2: Upload raw data to S3
+        csv_key = f"portfolio/{TODAY}/positions.csv"
+        csv_path = "/tmp/positions.csv"
+        df.to_csv(csv_path, index=False)
+        s3.upload_file(csv_path, DATA_BUCKET, csv_key)
+        log_to_s3(f"Raw data uploaded to s3://{DATA_BUCKET}/{csv_key}")
+
+        # Step 3: Analyze
+        summary = analyze_portfolio(df)
+        summary_key = f"analysis/{TODAY}/portfolio_summary.json"
+        s3.put_object(
+            Bucket=DATA_BUCKET,
+            Key=summary_key,
+            Body=json.dumps(summary, indent=2),
+            ContentType='application/json'
+        )
+        log_to_s3(f"Analysis uploaded to s3://{DATA_BUCKET}/{summary_key}")
+
+        # Step 4: Generate report
+        html_report = generate_report(df, summary)
+        report_key = f"daily_reports/{TODAY}/portfolio_report.html"
+        s3.put_object(
+            Bucket=REPORTS_BUCKET,
+            Key=report_key,
+            Body=html_report,
+            ContentType='text/html'
+        )
+        log_to_s3(f"Report uploaded to s3://{REPORTS_BUCKET}/{report_key}")
+
+        # Step 5: Print summary to console
+        print("\n" + "=" * 50)
+        print("  DAILY PORTFOLIO SUMMARY")
+        print("=" * 50)
+        print(f"\n{df.to_string(index=False)}")
+        print(f"\n  Total Value:    ${summary['total_market_value']:>12,.2f}")
+        print(f"  Unrealized P&L: ${summary['total_unrealized_pnl']:>12,.2f}")
+        print(f"  Best:  {summary['best_performer']} ({summary['best_return_pct']:+.2f}%)")
+        print(f"  Worst: {summary['worst_performer']} ({summary['worst_return_pct']:+.2f}%)")
+        print(f"\n{'=' * 50}")
+
+        log_to_s3("Pipeline completed successfully")
+
+    except Exception as e:
+        log_to_s3(f"Pipeline FAILED: {str(e)}", level="ERROR")
+        log_to_s3(traceback.format_exc(), level="ERROR")
+        raise
+
+if __name__ == '__main__':
+    run_pipeline()
